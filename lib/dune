@@ -1,0 +1,3 @@
+(library
+ (name npy)
+ (public_name npy))

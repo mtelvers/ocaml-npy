@@ -1,0 +1,7 @@
+(test
+ (name test_npy)
+ (libraries npy alcotest))
+
+(test
+ (name interop)
+ (libraries npy unix))
