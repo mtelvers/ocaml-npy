@@ -818,37 +818,88 @@ let read_shape filename =
       let* (dtype, _, order, shape, _) = read_header_ic ic in
       Ok (dtype, order, shape))
 
-let load_strided filename ~stride =
+(* Parse the preamble + header from a string that contains at least the whole
+   header (a small prefix of the file suffices).  Returns the dtype (with its
+   byte-swap flag), order, shape, and the absolute data offset. *)
+let parse_header_prefix s =
+  let len = String.length s in
+  if len < 8 || String.sub s 0 6 <> magic then Error "invalid magic number"
+  else
+    let major = Char.code s.[6] in
+    let* (hlen, preamble_len) =
+      match major with
+      | 1 ->
+        if len < 10 then Error "header truncated"
+        else Ok (Char.code s.[8] lor (Char.code s.[9] lsl 8), 10)
+      | 2 | 3 ->
+        if len < 12 then Error "header truncated"
+        else
+          Ok ( Char.code s.[8]
+               lor (Char.code s.[9] lsl 8)
+               lor (Char.code s.[10] lsl 16)
+               lor (Char.code s.[11] lsl 24),
+               12 )
+      | v -> Error (Printf.sprintf "unsupported format version %d" v)
+    in
+    if len < preamble_len + hlen then Error "npy header exceeds probe length"
+    else
+      let header = String.sub s preamble_len hlen in
+      let* descr_str = parse_descr header in
+      let* (dtype, needs_swap) = dtype_of_descr_internal descr_str in
+      let* order = parse_fortran_order header in
+      let* shape = parse_shape header in
+      Ok (dtype, needs_swap, order, shape, preamble_len + hlen)
+
+(* Initial probe size for reading the header through a [read] callback.  npy
+   headers are tiny (typically 64-128 bytes, padded); 16 KiB is ample. *)
+let header_probe = 16384
+
+let load_strided_reader ~read ~stride =
   if stride < 1 then Error "load_strided: stride must be >= 1"
   else
-    let ic = open_in_bin filename in
-    Fun.protect
-      ~finally:(fun () -> close_in ic)
-      (fun () ->
-        let* (dtype, needs_swap, order, shape, data_offset) =
-          read_header_ic ic
-        in
-        match order with
-        | Fortran -> Error "load_strided: Fortran order not supported"
-        | C ->
-          if Array.length shape = 0 || shape.(0) = 0 then Ok { dtype; order = C; shape; data = Bytes.create 0 }
-          else begin
-            let d0 = shape.(0) in
-            let inner = num_elements shape / d0 in
-            let esz = element_size dtype in
-            let row_bytes = inner * esz in
-            let n_rows = (d0 + stride - 1) / stride in
-            let out = Bytes.create (n_rows * row_bytes) in
-            for i = 0 to n_rows - 1 do
-              seek_in ic (data_offset + (i * stride) * row_bytes);
-              really_input ic out (i * row_bytes) row_bytes
-            done;
-            let su = swap_unit_size dtype in
-            if needs_swap && su > 1 then byte_swap_buffer out su;
-            let new_shape = Array.copy shape in
-            new_shape.(0) <- n_rows;
-            Ok { dtype; order = C; shape = new_shape; data = out }
-          end)
+    let* (dtype, needs_swap, order, shape, data_offset) =
+      parse_header_prefix (read ~offset:0 ~len:header_probe)
+    in
+    match order with
+    | Fortran -> Error "load_strided: Fortran order not supported"
+    | C ->
+      if Array.length shape = 0 || shape.(0) = 0 then
+        Ok { dtype; order = C; shape; data = Bytes.create 0 }
+      else begin
+        let d0 = shape.(0) in
+        let inner = num_elements shape / d0 in
+        let esz = element_size dtype in
+        let row_bytes = inner * esz in
+        let n_rows = (d0 + stride - 1) / stride in
+        let out = Bytes.create (n_rows * row_bytes) in
+        for i = 0 to n_rows - 1 do
+          let chunk =
+            read ~offset:(data_offset + (i * stride) * row_bytes) ~len:row_bytes
+          in
+          Bytes.blit_string chunk 0 out (i * row_bytes)
+            (min row_bytes (String.length chunk))
+        done;
+        let su = swap_unit_size dtype in
+        if needs_swap && su > 1 then byte_swap_buffer out su;
+        let new_shape = Array.copy shape in
+        new_shape.(0) <- n_rows;
+        Ok { dtype; order = C; shape = new_shape; data = out }
+      end
+
+let load_strided filename ~stride =
+  let ic = open_in_bin filename in
+  Fun.protect
+    ~finally:(fun () -> close_in ic)
+    (fun () ->
+      let flen = in_channel_length ic in
+      let read ~offset ~len =
+        if offset >= flen then ""
+        else begin
+          seek_in ic offset;
+          really_input_string ic (min len (flen - offset))
+        end
+      in
+      load_strided_reader ~read ~stride)
 
 let save filename t =
   let oc = open_out_bin filename in

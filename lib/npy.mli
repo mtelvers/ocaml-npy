@@ -246,6 +246,17 @@ val load_strided : string -> stride:int -> (t, string) result
     equivalent to {!load}.  Useful for cheaply loading a decimated view of a
     large array when full resolution is not needed. *)
 
+val load_strided_reader :
+  read:(offset:int -> len:int -> string) ->
+  stride:int ->
+  (t, string) result
+(** [load_strided_reader ~read ~stride] is {!load_strided} over an arbitrary
+    random-access byte source: [read ~offset ~len] must return up to [len]
+    bytes of the .npy data starting at [offset] (returning fewer only at the
+    end of the object). The header is read from an initial probe, then one
+    [read] is issued per kept row. This lets the same decimated decode run over
+    a local file, an HTTP/S3 byte-range source, or any other backing store. *)
+
 (** {1 Streaming} *)
 
 val write_header : out_channel -> ?order:order -> dtype -> int array -> unit
