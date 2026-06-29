@@ -233,6 +233,19 @@ val save : string -> t -> unit
 val load : string -> (t, string) result
 (** [load filename] reads and parses a .npy file. *)
 
+val read_shape : string -> (dtype * order * int array, string) result
+(** [read_shape filename] reads only the .npy header and returns the element
+    [dtype], memory [order], and [shape] without reading the array data. *)
+
+val load_strided : string -> stride:int -> (t, string) result
+(** [load_strided filename ~stride] reads every [stride]-th slice along axis 0,
+    seeking past the skipped rows so they are never read from disk.  The result
+    has the same dtype and trailing dimensions, with first dimension
+    [(shape.(0) + stride - 1) / stride].  Only C-order arrays are supported
+    ([Error] is returned for Fortran order).  With [stride = 1] this is
+    equivalent to {!load}.  Useful for cheaply loading a decimated view of a
+    large array when full resolution is not needed. *)
+
 (** {1 Streaming} *)
 
 val write_header : out_channel -> ?order:order -> dtype -> int array -> unit

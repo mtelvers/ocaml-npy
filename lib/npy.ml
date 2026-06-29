@@ -779,7 +779,76 @@ let decode s =
         if needs_swap && su > 1 then byte_swap_buffer data su;
         Ok { dtype; order; shape; data }
 
+(* Read just the preamble + header from a channel, leaving it positioned at the
+   start of the data.  Returns the dtype (with its byte-swap flag), order, shape
+   and the absolute data offset. *)
+let read_header_ic ic =
+  let preamble = really_input_string ic 8 in
+  if String.sub preamble 0 6 <> magic then Error "invalid magic number"
+  else
+    let major = Char.code preamble.[6] in
+    let* (hlen, preamble_len) =
+      match major with
+      | 1 ->
+        let b = really_input_string ic 2 in
+        Ok (Char.code b.[0] lor (Char.code b.[1] lsl 8), 10)
+      | 2 | 3 ->
+        let b = really_input_string ic 4 in
+        Ok ( Char.code b.[0]
+             lor (Char.code b.[1] lsl 8)
+             lor (Char.code b.[2] lsl 16)
+             lor (Char.code b.[3] lsl 24),
+             12 )
+      | v -> Error (Printf.sprintf "unsupported format version %d" v)
+    in
+    let header = really_input_string ic hlen in
+    let* descr_str = parse_descr header in
+    let* (dtype, needs_swap) = dtype_of_descr_internal descr_str in
+    let* order = parse_fortran_order header in
+    let* shape = parse_shape header in
+    Ok (dtype, needs_swap, order, shape, preamble_len + hlen)
+
 (* {1 File I/O} *)
+
+let read_shape filename =
+  let ic = open_in_bin filename in
+  Fun.protect
+    ~finally:(fun () -> close_in ic)
+    (fun () ->
+      let* (dtype, _, order, shape, _) = read_header_ic ic in
+      Ok (dtype, order, shape))
+
+let load_strided filename ~stride =
+  if stride < 1 then Error "load_strided: stride must be >= 1"
+  else
+    let ic = open_in_bin filename in
+    Fun.protect
+      ~finally:(fun () -> close_in ic)
+      (fun () ->
+        let* (dtype, needs_swap, order, shape, data_offset) =
+          read_header_ic ic
+        in
+        match order with
+        | Fortran -> Error "load_strided: Fortran order not supported"
+        | C ->
+          if Array.length shape = 0 || shape.(0) = 0 then Ok { dtype; order = C; shape; data = Bytes.create 0 }
+          else begin
+            let d0 = shape.(0) in
+            let inner = num_elements shape / d0 in
+            let esz = element_size dtype in
+            let row_bytes = inner * esz in
+            let n_rows = (d0 + stride - 1) / stride in
+            let out = Bytes.create (n_rows * row_bytes) in
+            for i = 0 to n_rows - 1 do
+              seek_in ic (data_offset + (i * stride) * row_bytes);
+              really_input ic out (i * row_bytes) row_bytes
+            done;
+            let su = swap_unit_size dtype in
+            if needs_swap && su > 1 then byte_swap_buffer out su;
+            let new_shape = Array.copy shape in
+            new_shape.(0) <- n_rows;
+            Ok { dtype; order = C; shape = new_shape; data = out }
+          end)
 
 let save filename t =
   let oc = open_out_bin filename in
